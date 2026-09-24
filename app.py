@@ -62,7 +62,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# DATA RETRIEVAL MODULE
+# DATA RETRIEVAL MODULE & ROBUUSTE INTRADAY FETCH
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_market_data(ticker_symbol: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
@@ -79,13 +79,29 @@ def get_market_data(ticker_symbol: str, period: str = "2y", interval: str = "1d"
         return pd.DataFrame()
 
 @st.cache_data(ttl=180)
-def get_intraday_data(ticker_symbol: str, period: str = "5d", interval: str = "1h") -> pd.DataFrame:
+def get_intraday_data_safe(ticker_symbol: str, interval: str = "1h", period: str = "5d") -> pd.DataFrame:
+    """
+    Haalt robuust intraday data op met fallbacks tegen yfinance interval/period limieten.
+    """
     try:
         ticker = yf.Ticker(ticker_symbol)
         df = ticker.history(period=period, interval=interval)
+        
+        if df.empty:
+            # Fallback naar kortere periode
+            df = ticker.history(period="1d", interval=interval)
+            
         if df.empty:
             return pd.DataFrame()
+            
         df.reset_index(inplace=True)
+        
+        # Standaardiseer kolomnamen
+        if 'Date' in df.columns:
+            df.rename(columns={'Date': 'Datetime'}, inplace=True)
+        elif 'index' in df.columns:
+            df.rename(columns={'index': 'Datetime'}, inplace=True)
+            
         return df
     except Exception:
         return pd.DataFrame()
@@ -106,7 +122,7 @@ def classify_stock_type(ticker: str, info: dict) -> str:
     summary = info.get('longBusinessSummary', '').upper()
     
     t_upper = ticker.upper()
-    if t_upper in ['IONQ', 'RGTI', 'QUBT', 'QUBT']:
+    if t_upper in ['IONQ', 'RGTI', 'QUBT']:
         return "QUANTUM"
     
     if "BIOTECH" in industry or "PHARMA" in industry or "BIOTECHNOLOGY" in sector:
@@ -125,7 +141,7 @@ def classify_stock_type(ticker: str, info: dict) -> str:
         return "HIGH-BETA / MOMENTUM"
     
     if sector:
-        return f"CONSUMER / LARGE CAP" if info.get('marketCap', 0) > 1e10 else "OTHER"
+        return "CONSUMER / LARGE CAP" if info.get('marketCap', 0) > 1e10 else "OTHER"
     return "OTHER"
 
 def get_adaptive_weights(stock_type: str) -> dict:
@@ -143,58 +159,75 @@ def get_adaptive_weights(stock_type: str) -> dict:
 # TECHNICAL & INDICATOR CALCULATIONS
 # -----------------------------------------------------------------------------
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if len(df) < 50:
+    if df.empty or len(df) < 14:
         return df
     
     close = df['Close']
-    df['EMA5'] = ta.trend.ema_indicator(close, window=5)
-    df['EMA20'] = ta.trend.ema_indicator(close, window=20)
-    df['EMA50'] = ta.trend.ema_indicator(close, window=50)
-    df['EMA200'] = ta.trend.ema_indicator(close, window=200) if len(df) >= 200 else np.nan
+    df['EMA5'] = ta.trend.ema_indicator(close, window=min(5, len(df)-1))
+    df['EMA20'] = ta.trend.ema_indicator(close, window=min(20, len(df)-1))
     
-    df['RSI14'] = ta.momentum.rsi(close, window=14)
+    if len(df) >= 50:
+        df['EMA50'] = ta.trend.ema_indicator(close, window=50)
+    else:
+        df['EMA50'] = np.nan
+        
+    if len(df) >= 200:
+        df['EMA200'] = ta.trend.ema_indicator(close, window=200)
+    else:
+        df['EMA200'] = np.nan
     
-    macd = ta.trend.MACD(close)
-    df['MACD'] = macd.macd()
-    df['MACD_sig'] = macd.macd_signal()
-    df['MACD_hist'] = macd.macd_diff()
+    df['RSI14'] = ta.momentum.rsi(close, window=min(14, len(df)-1))
     
-    df['Stoch_k'] = ta.momentum.stoch(df['High'], df['Low'], close, window=14, smooth_window=3)
-    df['ROC'] = ta.momentum.roc(close, window=12)
-    df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], close, window=14)
+    try:
+        macd = ta.trend.MACD(close)
+        df['MACD'] = macd.macd()
+        df['MACD_sig'] = macd.macd_signal()
+        df['MACD_hist'] = macd.macd_diff()
+    except Exception:
+        df['MACD_hist'] = 0.0
     
-    df['Vol_Avg20'] = df['Volume'].rolling(window=20).mean()
+    try:
+        df['Stoch_k'] = ta.momentum.stoch(df['High'], df['Low'], close, window=min(14, len(df)-1), smooth_window=3)
+    except Exception:
+        df['Stoch_k'] = 50.0
+
+    df['ROC'] = ta.momentum.roc(close, window=min(12, len(df)-1))
+    df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], close, window=min(14, len(df)-1))
+    
+    df['Vol_Avg20'] = df['Volume'].rolling(window=min(20, len(df))).mean()
     df['Vol_Ratio'] = df['Volume'] / (df['Vol_Avg20'] + 1e-9)
     
-    df['MFI'] = ta.volume.money_flow_index(df['High'], df['Low'], close, df['Volume'], window=14)
-    df['CMF'] = ta.volume.chaikin_money_flow(df['High'], df['Low'], close, df['Volume'], window=20)
-    df['OBV'] = ta.volume.on_balance_volume(close, df['Volume'])
-    
+    try:
+        df['MFI'] = ta.volume.money_flow_index(df['High'], df['Low'], close, df['Volume'], window=min(14, len(df)-1))
+        df['CMF'] = ta.volume.chaikin_money_flow(df['High'], df['Low'], close, df['Volume'], window=min(20, len(df)-1))
+    except Exception:
+        df['MFI'] = 50.0
+        df['CMF'] = 0.0
+        
     return df
 
 def calculate_technical_score(df: pd.DataFrame) -> tuple:
-    if df.empty or len(df) < 50:
+    if df.empty or len(df) < 14:
         return 0.0, "INSUFFICIENT DATA"
     
     row = df.iloc[-1]
     score = 0
-    max_pts = 100
     
     # Trend structure
-    if row['Close'] > row['EMA20']: score += 25
-    if row['EMA20'] > row['EMA50']: score += 25
-    if pd.notna(row['EMA200']) and row['EMA50'] > row['EMA200']: score += 15
-    if row['Close'] > row['EMA5']: score += 10
+    if pd.notna(row.get('EMA20')) and row['Close'] > row['EMA20']: score += 25
+    if pd.notna(row.get('EMA50')) and pd.notna(row.get('EMA20')) and row['EMA20'] > row['EMA50']: score += 25
+    if pd.notna(row.get('EMA200')) and pd.notna(row.get('EMA50')) and row['EMA50'] > row['EMA200']: score += 15
+    if pd.notna(row.get('EMA5')) and row['Close'] > row['EMA5']: score += 10
     
     # RSI
-    rsi = row['RSI14']
+    rsi = row.get('RSI14')
     if pd.notna(rsi):
         if 50 <= rsi <= 70: score += 15
         elif 40 <= rsi < 50: score += 10
         elif rsi > 70: score += 5
         
     # MACD
-    if pd.notna(row['MACD_hist']) and row['MACD_hist'] > 0: score += 10
+    if pd.notna(row.get('MACD_hist')) and row['MACD_hist'] > 0: score += 10
     
     trend_desc = "NEUTRAL"
     if score >= 80: trend_desc = "STRONG BULLISH"
@@ -205,67 +238,84 @@ def calculate_technical_score(df: pd.DataFrame) -> tuple:
     return float(score), trend_desc
 
 def calculate_momentum_score(df: pd.DataFrame) -> float:
-    if df.empty or len(df) < 20: return 0.0
+    if df.empty or len(df) < 10: return 0.0
     row = df.iloc[-1]
     score = 0
-    if pd.notna(row['ROC']):
+    if pd.notna(row.get('ROC')):
         score += np.clip(row['ROC'] * 4, 0, 40)
-    if pd.notna(row['Stoch_k']):
+    if pd.notna(row.get('Stoch_k')):
         if 40 <= row['Stoch_k'] <= 80: score += 30
         elif row['Stoch_k'] > 80: score += 15
-    if pd.notna(row['RSI14']) and row['RSI14'] > 50:
+    if pd.notna(row.get('RSI14')) and row['RSI14'] > 50:
         score += 30
     return float(np.clip(score, 0, 100))
 
 def calculate_volume_score(df: pd.DataFrame) -> float:
-    if df.empty or len(df) < 20: return 0.0
+    if df.empty or len(df) < 10: return 0.0
     row = df.iloc[-1]
     score = 0
-    vr = row['Vol_Ratio'] if pd.notna(row['Vol_Ratio']) else 1.0
+    vr = row.get('Vol_Ratio', 1.0) if pd.notna(row.get('Vol_Ratio')) else 1.0
     
     if vr >= 2.0: score += 50
     elif vr >= 1.3: score += 35
     elif vr >= 1.0: score += 20
     
     # Price confirmation
-    if row['Close'] > df['Close'].iloc[-2]:
+    if len(df) > 1 and row['Close'] > df['Close'].iloc[-2]:
         score += 50
     return float(np.clip(score, 0, 100))
 
 def calculate_money_flow_score(df: pd.DataFrame) -> float:
-    if df.empty or len(df) < 20: return 0.0
+    if df.empty or len(df) < 10: return 0.0
     row = df.iloc[-1]
     score = 50.0
-    if pd.notna(row['MFI']):
+    if pd.notna(row.get('MFI')):
         score = row['MFI']
-    if pd.notna(row['CMF']):
+    if pd.notna(row.get('CMF')):
         score = (score + np.clip((row['CMF'] + 0.5) * 100, 0, 100)) / 2
     return float(np.clip(score, 0, 100))
 
 # -----------------------------------------------------------------------------
-# MULTI-TIMEFRAME ALIGNMENT
+# MULTI-TIMEFRAME ALIGNMENT (HERZIEN EN CRASH-PROOF)
 # -----------------------------------------------------------------------------
 def calculate_mtf_alignment(ticker: str) -> tuple:
+    # 1D Timeframe
     df_1d = get_market_data(ticker, period="6m", interval="1d")
-    df_1h = get_intraday_data(ticker, period="5d", interval="1h")
-    df_15m = get_intraday_data(ticker, period="3d", interval="15m")
-    
-    if df_1d.empty: return 0.0, "DATA UNAVAILABLE"
-    
-    d_score, _ = calculate_technical_score(calculate_technical_indicators(df_1d))
-    
-    h_score = 50.0
-    if not df_1h.empty and len(df_1h) >= 20:
-        df_1h = calculate_technical_indicators(df_1h)
-        if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['EMA20']: h_score += 25
-        if df_1h.iloc[-1]['RSI14'] > 50: h_score += 25
+    if df_1d.empty or len(df_1d) < 14:
+        return 0.0, "DATA UNAVAILABLE"
         
-    m15_score = 50.0
-    if not df_15m.empty and len(df_15m) >= 20:
-        df_15m = calculate_technical_indicators(df_15m)
-        if df_15m.iloc[-1]['Close'] > df_15m.iloc[-1]['EMA20']: m15_score += 25
-        if df_15m.iloc[-1]['Vol_Ratio'] > 1.2: m15_score += 25
+    df_1d = calculate_technical_indicators(df_1d)
+    d_score, _ = calculate_technical_score(df_1d)
 
+    # 1H Timeframe (Met Fallback op Daily)
+    df_1h = get_intraday_data_safe(ticker, interval="1h", period="5d")
+    h_score = d_score 
+    
+    if not df_1h.empty and len(df_1h) >= 10:
+        df_1h = calculate_technical_indicators(df_1h)
+        h_score = 50.0
+        last_1h = df_1h.iloc[-1]
+        
+        if pd.notna(last_1h.get('EMA20')) and last_1h['Close'] > last_1h['EMA20']: 
+            h_score += 25
+        if pd.notna(last_1h.get('RSI14')) and last_1h['RSI14'] > 50: 
+            h_score += 25
+
+    # 15M Timeframe (Max 3D ivm yfinance limieten)
+    df_15m = get_intraday_data_safe(ticker, interval="15m", period="3d")
+    m15_score = h_score 
+    
+    if not df_15m.empty and len(df_15m) >= 10:
+        df_15m = calculate_technical_indicators(df_15m)
+        m15_score = 50.0
+        last_15m = df_15m.iloc[-1]
+        
+        if pd.notna(last_15m.get('EMA20')) and last_15m['Close'] > last_15m['EMA20']: 
+            m15_score += 25
+        if pd.notna(last_15m.get('Vol_Ratio')) and last_15m['Vol_Ratio'] > 1.1: 
+            m15_score += 25
+
+    # Samengestelde gewogen MTF Score
     mtf_score = (d_score * 0.5) + (h_score * 0.3) + (m15_score * 0.2)
     
     if mtf_score >= 80: alignment = "STERK (ALIGNED)"
@@ -280,14 +330,13 @@ def calculate_mtf_alignment(ticker: str) -> tuple:
 # OPTIONS, SHORT INTEREST, & COMMODITY MODULES
 # -----------------------------------------------------------------------------
 def calculate_options_score(info: dict) -> tuple:
-    # Verifies real availability without fabricating numbers
     if 'options' not in info and not info.get('openInterest'):
         return None, "DATA UNAVAILABLE"
     return 50.0, "NEUTRAL"
 
 def calculate_short_module(info: dict, df: pd.DataFrame) -> tuple:
     short_float = info.get('shortPercentOfFloat', None)
-    short_ratio = info.get('shortRatio', None) # Days to cover
+    short_ratio = info.get('shortRatio', None)
     
     if short_float is None:
         return None, None, "DATA UNAVAILABLE"
@@ -295,9 +344,8 @@ def calculate_short_module(info: dict, df: pd.DataFrame) -> tuple:
     sf_pct = short_float * 100
     short_score = np.clip(sf_pct * 3, 0, 100)
     
-    # Short Squeeze Potential calculation
-    vol_spike = df.iloc[-1]['Vol_Ratio'] > 1.5 if not df.empty else False
-    price_breakout = df.iloc[-1]['Close'] > df.iloc[-1]['EMA20'] if not df.empty else False
+    vol_spike = df.iloc[-1]['Vol_Ratio'] > 1.5 if not df.empty and 'Vol_Ratio' in df.columns else False
+    price_breakout = df.iloc[-1]['Close'] > df.iloc[-1]['EMA20'] if not df.empty and 'EMA20' in df.columns else False
     
     squeeze_score = (sf_pct * 2.5) + (short_ratio * 5 if short_ratio else 0)
     if vol_spike: squeeze_score += 15
@@ -333,23 +381,21 @@ def calculate_commodity_score(stock_type: str) -> tuple:
 # GENUINE MACHINE LEARNING MODULE
 # -----------------------------------------------------------------------------
 def train_and_predict_ml(df: pd.DataFrame) -> tuple:
-    if len(df) < 120:
-        return None, None, "INSUFFICIENT DATA FOR ML (<120 bars)"
+    if len(df) < 100:
+        return None, None, "INSUFFICIENT DATA FOR ML (<100 bars)"
     
     df_ml = df.copy()
-    # Target: Will stock close higher in 3 trading sessions?
     df_ml['Target'] = (df_ml['Close'].shift(-3) > df_ml['Close']).astype(int)
     
     features = ['RSI14', 'MACD_hist', 'Vol_Ratio', 'ROC', 'Stoch_k', 'MFI']
     df_ml.dropna(subset=features + ['Target'], inplace=True)
     
-    if len(df_ml) < 100:
+    if len(df_ml) < 80:
         return None, None, "INSUFFICIENT CLEAN DATA"
         
     X = df_ml[features]
     y = df_ml['Target']
     
-    # TimeSeriesSplit validation - NO LOOK-AHEAD BIAS
     tscv = TimeSeriesSplit(n_splits=3)
     train_idx, test_idx = list(tscv.split(X))[-1]
     
@@ -365,7 +411,6 @@ def train_and_predict_ml(df: pd.DataFrame) -> tuple:
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
     
-    # Predict on latest bar
     latest_features = X.iloc[[-1]]
     prob = model.predict_proba(latest_features)[0][1] * 100
     confidence = acc * 100
@@ -379,7 +424,7 @@ def calculate_trade_levels(df: pd.DataFrame) -> dict:
     if df.empty or len(df) < 20: return {}
     row = df.iloc[-1]
     entry = row['Close']
-    atr = row['ATR'] if pd.notna(row['ATR']) else (entry * 0.02)
+    atr = row['ATR'] if pd.notna(row.get('ATR')) else (entry * 0.02)
     
     stop = entry - (1.2 * atr)
     tp1 = entry + (1.5 * (entry - stop))
@@ -392,7 +437,7 @@ def calculate_trade_levels(df: pd.DataFrame) -> dict:
     entry_type = "TREND CONTINUATION"
     if row['Close'] > df['High'].rolling(20).max().iloc[-2]:
         entry_type = "BREAKOUT"
-    elif row['Close'] < row['EMA20'] and row['Close'] > row['EMA50']:
+    elif 'EMA20' in row and 'EMA50' in row and row['Close'] < row['EMA20'] and row['Close'] > row['EMA50']:
         entry_type = "PULLBACK"
         
     return {
@@ -411,13 +456,13 @@ def generate_reasons_and_risks(df: pd.DataFrame, score: float) -> tuple:
     if df.empty: return reasons, risks
     row = df.iloc[-1]
     
-    if row['Close'] > row['EMA20']: reasons.append("Price structured above 20 EMA")
-    if row['Vol_Ratio'] > 1.3: reasons.append(f"Volume spike ({row['Vol_Ratio']:.1f}x average)")
-    if row['MACD_hist'] > 0: reasons.append("MACD histogram turned positive")
+    if pd.notna(row.get('EMA20')) and row['Close'] > row['EMA20']: reasons.append("Price structured above 20 EMA")
+    if pd.notna(row.get('Vol_Ratio')) and row['Vol_Ratio'] > 1.3: reasons.append(f"Volume spike ({row['Vol_Ratio']:.1f}x average)")
+    if pd.notna(row.get('MACD_hist')) and row['MACD_hist'] > 0: reasons.append("MACD histogram turned positive")
     
-    if row['RSI14'] > 68: risks.append("RSI approaching overbought levels (>68)")
-    if row['Vol_Ratio'] < 0.8: risks.append("Sub-average volume confirmation")
-    if row['Close'] < row['EMA50']: risks.append("Trading below key 50 EMA support")
+    if pd.notna(row.get('RSI14')) and row['RSI14'] > 68: risks.append("RSI approaching overbought levels (>68)")
+    if pd.notna(row.get('Vol_Ratio')) and row['Vol_Ratio'] < 0.8: risks.append("Sub-average volume confirmation")
+    if pd.notna(row.get('EMA50')) and row['Close'] < row['EMA50']: risks.append("Trading below key 50 EMA support")
     
     return reasons, risks
 
@@ -454,7 +499,7 @@ def main():
                 stock_type = classify_stock_type(ticker, info)
                 weights = get_adaptive_weights(stock_type)
                 
-                # Scores
+                # Component Scores
                 tech_score, trend_desc = calculate_technical_score(df_daily)
                 mom_score = calculate_momentum_score(df_daily)
                 vol_score = calculate_volume_score(df_daily)
@@ -470,7 +515,7 @@ def main():
                 dq_items = [df_daily is not None, opt_score is not None, short_score is not None, ml_prob is not None]
                 data_quality = (sum(1 for item in dq_items if item) / len(dq_items)) * 100
                 
-                # Adaptive SST Calculation
+                # Adaptive SST Weighting
                 final_score = 0.0
                 total_weight = 0.0
                 
@@ -491,7 +536,7 @@ def main():
                 else:
                     final_score = tech_score
                     
-                # Signal
+                # Signal Categorization
                 if final_score >= 78 and mtf_score >= 65: signal = "STRONG BUY"
                 elif final_score >= 65: signal = "BUY"
                 elif final_score >= 50: signal = "WATCH"
@@ -523,6 +568,9 @@ def main():
         
         table_data = []
         for r in results:
+            rsi_val = r['DF'].iloc[-1].get('RSI14')
+            vol_val = r['DF'].iloc[-1].get('Vol_Ratio')
+            
             table_data.append({
                 "Ticker": r["Ticker"],
                 "Type": r["Type"],
@@ -530,8 +578,8 @@ def main():
                 "SST Score": f"{r['SST Score']:.1f}",
                 "ML Prob": f"{r['ML Prob']:.1f}%" if r["ML Prob"] is not None else "UNAVAILABLE",
                 "MTF": r["MTF Align"],
-                "RSI": f"{r['DF'].iloc[-1]['RSI14']:.1f}" if pd.notna(r['DF'].iloc[-1]['RSI14']) else "N/A",
-                "Volume Ratio": f"{r['DF'].iloc[-1]['Vol_Ratio']:.2f}x",
+                "RSI": f"{rsi_val:.1f}" if pd.notna(rsi_val) else "N/A",
+                "Volume Ratio": f"{vol_val:.2f}x" if pd.notna(vol_val) else "N/A",
                 "Squeeze Score": f"{r['Squeeze Score']:.1f}" if r["Squeeze Score"] is not None else "N/A",
                 "Signal": r["Signal"]
             })
