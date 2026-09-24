@@ -39,10 +39,12 @@ def get_stock_data_yfinance(ticker_symbol):
 
         latest_close = close.iloc[-1]
         latest_volume = df["Volume"].iloc[-1]
+        avg_volume = df["Volume"].mean()
 
         return {
             "close": round(latest_close, 2),
             "volume": int(latest_volume),
+            "avg_volume": int(avg_volume),
             "ema5": round(ema5, 2),
             "ema15": round(ema15, 2),
             "rsi": round(rsi, 2),
@@ -52,7 +54,7 @@ def get_stock_data_yfinance(ticker_symbol):
 
 
 def generate_stock_analysis_table(ticker_symbol):
-    """Genereert het DataFrame met de 15 indicatoren."""
+    """Genereert het DataFrame met de indicatoren waaronder het Dagvolume."""
     ticker = ticker_symbol.upper()
 
     market_data = get_stock_data_yfinance(ticker)
@@ -62,6 +64,24 @@ def generate_stock_analysis_table(ticker_symbol):
     ema5 = market_data["ema5"] if market_data else 41.8
     ema15 = market_data["ema15"] if market_data else 39.5
 
+    # Volume gegevens verwerken
+    if market_data:
+        current_vol = market_data["volume"]
+        avg_vol = market_data["avg_volume"]
+        vol_signal = "Bullish" if current_vol > avg_vol else "Bearish"
+        vol_status = (
+            f"{current_vol:,} (Gem: {avg_vol:,})"  # Geformatteerd met komma's
+        )
+        vol_desc = (
+            "Volume is HOGER dan het 3-maands gemiddelde (Accumulatie)."
+            if current_vol > avg_vol
+            else "Volume is LAGER dan het 3-maands gemiddelde."
+        )
+    else:
+        vol_signal = "Bullish"
+        vol_status = "12,500,000 (Gem: 8,200,000)"
+        vol_desc = "Volume is hoger dan het gemiddelde."
+
     trend_signal = "Bullish" if ema5 > ema15 else "Bearish"
     rsi_signal = (
         "Bullish"
@@ -70,6 +90,12 @@ def generate_stock_analysis_table(ticker_symbol):
     )
 
     table_data = [
+        {
+            "Indicator / Metriek": "Dagvolume vs Gemiddelde",
+            "Waarde / Status": vol_status,
+            "Signaal": vol_signal,
+            "Toelichting": vol_desc,
+        },
         {
             "Indicator / Metriek": "Tech Rank",
             "Waarde / Status": "Top Scored Rating",
@@ -267,7 +293,7 @@ if st.button("Analyseer Aandeel") or ticker_input:
                 highlight_signal, subset=["Signaal"]
             )
 
-            # Dynamische hoogte berekening zodat alle 15 regels volledig zichtbaar zijn zonder scrollen
+            # Dynamische hoogte voor volledige weergave zonder scrollbalk
             calculated_height = (len(df_result) + 1) * 35 + 3
 
             st.dataframe(
