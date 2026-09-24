@@ -261,11 +261,20 @@ if st.button("Analyseer Aandeel") or ticker_input:
 
             st.markdown("---")
 
-            # 3. WEERGAVE TABEL MET GROENE EN RODE ACCENTEN (Gebruik .map)
+            # 3. WEERGAVE TABEL ZONDER SCROLLBALK
             st.subheader("Gedetailleerde Technische Indicatoren")
             styled_df = df_result.style.map(
                 highlight_signal, subset=["Signaal"]
             )
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            # Dynamische hoogte berekening zodat alle 15 regels volledig zichtbaar zijn zonder scrollen
+            calculated_height = (len(df_result) + 1) * 35 + 3
+
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                hide_index=True,
+                height=calculated_height,
+            )
         else:
             st.error("Er kon geen data worden opgehaald voor deze ticker.")
