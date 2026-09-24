@@ -7,13 +7,13 @@ import yfinance as yf
 
 # Page setup voor Streamlit
 st.set_page_config(
-    page_title="Stock Setups & Technical Analysis",
+    page_title="Stock Setups & Technical Dashboard",
     page_icon="📈",
     layout="wide",
 )
 
 
-@st.cache_data(ttl=900)  # Cacht gegevens 15 minuten voor snellere laadtijd
+@st.cache_data(ttl=900)
 def get_stock_data_yfinance(ticker_symbol):
     """Haalt actuele koers- en technische gegevens op via Yahoo Finance."""
     try:
@@ -47,37 +47,8 @@ def get_stock_data_yfinance(ticker_symbol):
             "ema15": round(ema15, 2),
             "rsi": round(rsi, 2),
         }
-    except Exception as e:
-        return None
-
-
-def fetch_stocksetups_data(ticker_symbol):
-    """Scrapet stocksetups.com voor het specifieke symbool."""
-    ticker_symbol = ticker_symbol.upper()
-    url = f"https://stocksetups.com/symbol/{ticker_symbol}"
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        )
-    }
-
-    scraped_data = {}
-    try:
-        response = requests.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            soup = bs4.BeautifulSoup(response.text, "html.parser")
-            elements = soup.find_all(["div", "span", "td"])
-            for el in elements:
-                text = el.get_text(strip=True)
-                if ":" in text:
-                    parts = text.split(":", 1)
-                    scraped_data[parts[0].strip().lower()] = parts[1].strip()
     except Exception:
-        pass
-
-    return scraped_data
+        return None
 
 
 def generate_stock_analysis_table(ticker_symbol):
@@ -117,7 +88,7 @@ def generate_stock_analysis_table(ticker_symbol):
         {
             "Indicator / Metriek": "Short Interest",
             "Waarde / Status": "~15% - 18% van float",
-            "Signaal": "Bearish / Neutraal",
+            "Signaal": "Bearish",
             "Toelichting": (
                 "Verhoogde short-positie geeft druk, maar biedt short squeeze"
                 " potentieel."
@@ -226,6 +197,16 @@ def generate_stock_analysis_table(ticker_symbol):
     return pd.DataFrame(table_data)
 
 
+# Functie voor het inkleuren van de cellen op basis van het signaal
+def highlight_signal(val):
+    if isinstance(val, str):
+        if "Bullish" in val:
+            return "background-color: #28a745; color: white; font-weight: bold;"
+        elif "Bearish" in val:
+            return "background-color: #dc3545; color: white; font-weight: bold;"
+    return ""
+
+
 # --- STREAMLIT UI ---
 st.title("📈 Stock Setups & Technical Dashboard")
 st.write(
@@ -233,7 +214,6 @@ st.write(
     " indicatoren te genereren."
 )
 
-# Invoer van gebruiker via de webinterface
 ticker_input = st.text_input("Aandeel Ticker (bijv. IONQ, NVDA, TSLA):", "IONQ")
 
 if st.button("Analyseer Aandeel") or ticker_input:
@@ -241,9 +221,48 @@ if st.button("Analyseer Aandeel") or ticker_input:
         df_result = generate_stock_analysis_table(ticker_input)
 
         if df_result is not None:
-            st.subheader(f"Analyse resultaten voor {ticker_input.upper()}")
+            # 1. BEREKENING EINDCONCLUSIE EN SCORE
+            total_indicators = len(df_result)
+            bullish_count = (df_result["Signaal"] == "Bullish").sum()
+            bearish_count = (df_result["Signaal"] == "Bearish").sum()
 
-            # Toon data als een schone Streamlit tabel
-            st.dataframe(df_result, use_container_width=True, hide_index=True)
+            # Berekening score op schaal van 1 tot 10
+            score = round((bullish_count / total_indicators) * 10, 1)
+
+            if score >= 7.5:
+                verdict = "STERK BUY (BULLISH)"
+                alert_type = st.success
+            elif score >= 5.5:
+                verdict = "MATIG BUY / WATCH (NEUTRAAL-BULLISH)"
+                alert_type = st.info
+            elif score >= 4.0:
+                verdict = "NEUTRAAL / NEEM GEEN POSITIE IN"
+                alert_type = st.warning
+            else:
+                verdict = "AVOID / BEARISH (Druk aanwezig)"
+                alert_type = st.error
+
+            # 2. WEERGAVE EINDCONCLUSIE BOVEN DE TABEL
+            st.subheader(f"Eindconclusie voor {ticker_input.upper()}")
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Totaal Score", f"{score} / 10")
+            col2.metric("Bullish Signalen", f"{bullish_count} / {total_indicators}")
+            col3.metric("Bearish Signalen", f"{bearish_count} / {total_indicators}")
+
+            alert_type(
+                f"**Advies:** {verdict} — Het aandeel vertoont een totaalscore"
+                f" van {score}/10 gebaseerd op {bullish_count} positieve"
+                " indicatoren."
+            )
+
+            st.markdown("---")
+
+            # 3. WEERGAVE TABEL MET GROENE EN RODE ACCENTEN
+            st.subheader("Gedetailleerde Technische Indicatoren")
+            styled_df = df_result.style.applymap(
+                highlight_signal, subset=["Signaal"]
+            )
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
         else:
             st.error("Er kon geen data worden opgehaald voor deze ticker.")
