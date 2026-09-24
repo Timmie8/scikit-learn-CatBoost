@@ -226,7 +226,6 @@ if st.button("Analyseer Aandeel") or ticker_input:
             bullish_count = (df_result["Signaal"] == "Bullish").sum()
             bearish_count = (df_result["Signaal"] == "Bearish").sum()
 
-            # Berekening score op schaal van 1 tot 10
             score = round((bullish_count / total_indicators) * 10, 1)
 
             if score >= 7.5:
@@ -247,8 +246,12 @@ if st.button("Analyseer Aandeel") or ticker_input:
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Totaal Score", f"{score} / 10")
-            col2.metric("Bullish Signalen", f"{bullish_count} / {total_indicators}")
-            col3.metric("Bearish Signalen", f"{bearish_count} / {total_indicators}")
+            col2.metric(
+                "Bullish Signalen", f"{bullish_count} / {total_indicators}"
+            )
+            col3.metric(
+                "Bearish Signalen", f"{bearish_count} / {total_indicators}"
+            )
 
             alert_type(
                 f"**Advies:** {verdict} — Het aandeel vertoont een totaalscore"
@@ -258,9 +261,9 @@ if st.button("Analyseer Aandeel") or ticker_input:
 
             st.markdown("---")
 
-            # 3. WEERGAVE TABEL MET GROENE EN RODE ACCENTEN
+            # 3. WEERGAVE TABEL MET GROENE EN RODE ACCENTEN (Gebruik .map)
             st.subheader("Gedetailleerde Technische Indicatoren")
-            styled_df = df_result.style.applymap(
+            styled_df = df_result.style.map(
                 highlight_signal, subset=["Signaal"]
             )
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
